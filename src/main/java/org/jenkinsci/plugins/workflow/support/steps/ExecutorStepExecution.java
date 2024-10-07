@@ -979,13 +979,25 @@ public class ExecutorStepExecution extends AbstractStepExecutionImpl {
             @Deprecated
             private WorkspaceList.Lease lease;
             private final ExecutorStepExecution execution;
+            private transient final Thread heartbeat;
 
             Callback(String cookie, ExecutorStepExecution execution) {
                 this.cookie = cookie;
                 this.execution = execution;
+                this.heartbeat = null;
+            }
+            Callback(String cookie, ExecutorStepExecution execution, Thread t) {
+                this.cookie = cookie;
+                this.execution = execution;
+                this.heartbeat = t;
             }
 
             @Override protected void finished(StepContext bodyContext) throws Exception {
+                if (heartbeat != null) {
+                    heartbeat.interrupt();
+                } else {
+                    LOGGER.warning("No heartbeat thread!!");
+                }
                 if (execution == null) { // compatibility with old serial forms
                     lease.release();
                     lease = null;
@@ -1078,6 +1090,21 @@ public class ExecutorStepExecution extends AbstractStepExecutionImpl {
                         if (p == null) {
                             throw new IllegalStateException(node + " is offline");
                         }
+
+                        Thread t = new Thread(() -> {
+                            while (true) {
+                                LOGGER.info(() -> String.format("Node %s is being used", exec.getOwner().getName()));
+                                try {
+                                    Thread.sleep(10 * 1000);
+                                } catch (InterruptedException e) {
+                                    // all good, we are just interrupted
+                                    LOGGER.info(() -> String.format("Node %s is being stopped", exec.getOwner().getName()));
+                                    return;
+                                }
+                            }
+                        });
+                        t.start();
+
                         WorkspaceList.Lease lease = computer.getWorkspaceList().allocate(p);
                         FilePath workspace = lease.path;
                         // Cf. AbstractBuild.getEnvironment:
@@ -1094,7 +1121,7 @@ public class ExecutorStepExecution extends AbstractStepExecutionImpl {
                             execution.state = state;
                             execution.body = context.newBodyInvoker()
                                 .withContexts(env, state)
-                                .withCallback(new Callback(cookie, execution))
+                                .withCallback(new Callback(cookie, execution, t))
                                 .start();
                             LOGGER.fine(() -> "started " + context);
                             context.saveState();
